@@ -58,3 +58,11 @@ python app.py --selftest 表.xlsx -o 结果.xlsx --merge 尹湉黙=尹湉默   #
   任何不一致都会报错。不想要就取消勾选「统计后自动校验」。
 - 打包出来的 app 自带 Python 和依赖，目标机器不需要装 Python。
 - 想改中文名，直接把 `AttendanceTally.app` / `AttendanceTally.exe` 改名就行。
+
+## 常见问题
+
+- **从 GitHub 下载 macOS 产物后打不开**：解压出的 app 如果提示权限不足，执行
+  `chmod +x AttendanceTally.app/Contents/MacOS/AttendanceTally`；被 Gatekeeper 拦就
+  右键 →「打开」，或 `xattr -dr com.apple.quarantine AttendanceTally.app`。
+- **Windows 上被 SmartScreen 拦**：点「更多信息」→「仍要运行」。
+- **Actions 里下载产物很慢**：产物是云端压缩包，国内网络可能很慢，多试几次或换网络。
