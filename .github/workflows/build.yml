@@ -1,0 +1,42 @@
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pyinstaller
+      - run: >
+          pyinstaller --noconfirm --clean --windowed
+          --name AttendanceTally
+          --osx-bundle-identifier com.local.attendancetally
+          app.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AttendanceTally-macos
+          path: dist/AttendanceTally.app
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pyinstaller
+      - run: >
+          pyinstaller --noconfirm --clean --windowed --onefile
+          --name AttendanceTally
+          app.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AttendanceTally-windows
+          path: dist/AttendanceTally.exe

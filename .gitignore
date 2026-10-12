@@ -1,0 +1,12 @@
+.venv/
+build/
+dist/
+*.app/
+__pycache__/
+*.pyc
+.DS_Store
+
+# never commit the actual attendance data
+*.xlsx
+*.xlsm
+*.xls
