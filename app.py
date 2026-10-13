@@ -6,7 +6,7 @@ spreadsheets and writes a single summary workbook. The counting logic lives in
 attendance_tally.py (same code as the `attendance-tally` skill).
 
 Headless self-test (no window):
-    python app.py --selftest INPUT1.xlsx [INPUT2.xlsx ...] -o OUT.xlsx [--merge A=B]
+    python app.py --selftest INPUT1.xlsx [INPUT2.xlsx ...] -o OUT.xlsx
 """
 
 import collections
@@ -53,28 +53,13 @@ def reveal_path(path):
         open_path(os.path.dirname(path) or ".")
 
 
-def parse_merges(text):
-    merges = {}
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if "=" not in line:
-            raise ValueError("合并规则要写成 旧名=正确名，这一行有问题：" + line)
-        a, b = line.split("=", 1)
-        a, b = a.strip(), b.strip()
-        if a and b:
-            merges[a] = b
-    return merges
-
-
 def default_output(paths):
     if not paths:
         return ""
     return os.path.join(os.path.dirname(os.path.abspath(paths[0])), DEFAULT_OUT_NAME)
 
 
-def run_tally(paths, out_path, merges, verify, log):
+def run_tally(paths, out_path, verify, log):
     sheets = []
     for p in paths:
         try:
@@ -83,24 +68,27 @@ def run_tally(paths, out_path, merges, verify, log):
             raise RuntimeError("打不开文件 %s：%s" % (os.path.basename(p), exc)) from exc
         for title, rows in loaded:
             sheets.append((os.path.basename(p), title, rows))
-    counts, order, grades, notes, warnings = core.tally(sheets, merges)
+    counts, order, grades, notes, warnings = core.tally(sheets)
     rows = core.build_rows(counts, order, grades)
+    flagged, notices = core.find_variants(rows)
     for n in notes:
         log(n)
     if not rows:
         raise RuntimeError("没有找到可统计的考勤行：需要包含“学生所属班级”列"
                            "以及表头带“学生姓名”的名单列。")
-    core.write_book(rows, out_path)
+    core.write_book(rows, out_path, flagged)
     total = sum(c for _, _, c in rows)
     log("合计：%d 人，%d 次" % (len(rows), total))
     for w in warnings:
         log("警告：" + w)
+    for n in notices:
+        log("提示：" + n)
     if verify:
         xml_sheets = []
         for p in paths:
             for title, rows2 in core.sheets_xml(p):
                 xml_sheets.append((os.path.basename(p), title, rows2))
-        counts2, _, _, _, _ = core.tally(xml_sheets, merges)
+        counts2, _, _, _, _ = core.tally(xml_sheets)
         if counts2 != counts:
             raise RuntimeError("校验失败：openpyxl 与原始 XML 两种解析结果不一致")
         got, header = core.read_back(out_path)
@@ -242,16 +230,9 @@ def build_app():
 
     ttk.Button(opt, text="浏览...", command=pick_out).grid(row=0, column=2)
 
-    ttk.Label(opt, text="合并同名").grid(row=1, column=0, sticky="nw", pady=3)
-    merge_txt = tk.Text(opt, height=2, width=1, font=BASE_FONT, relief="solid", borderwidth=1)
-    merge_txt.grid(row=1, column=1, columnspan=2, sticky="ew", padx=8, pady=3)
-    merge_txt.insert("1.0", "")
-    ttk.Label(opt, text="一个人写法不一致时填这里，每行一条，例如：尹湉黙=尹湉默",
-              style="Hint.TLabel").grid(row=2, column=1, columnspan=2, sticky="w", padx=8)
-
     verify_var = tk.BooleanVar(value=True)
     ttk.Checkbutton(opt, text="统计后自动校验（推荐）", variable=verify_var).grid(
-        row=3, column=1, sticky="w", padx=8, pady=(6, 0))
+        row=1, column=1, sticky="w", padx=8, pady=(6, 0))
 
     # ---- action ----
     act = ttk.Frame(outer)
@@ -312,10 +293,10 @@ def build_app():
             pass
         root.after(100, drain)
 
-    def worker(paths, out_path, merges, verify):
+    def worker(paths, out_path, verify):
         try:
             log("开始统计，共 %d 个文件" % len(paths))
-            run_tally(paths, out_path, merges, verify, log)
+            run_tally(paths, out_path, verify, log)
             app["q"].put(("status", "完成"))
             app["q"].put(("done", True))
         except Exception as exc:  # noqa: BLE001
@@ -334,11 +315,6 @@ def build_app():
         out_path = out_var.get().strip() or default_output(paths)
         if not out_path.lower().endswith((".xlsx", ".xlsm")):
             out_path += ".xlsx"
-        try:
-            merges = parse_merges(merge_txt.get("1.0", "end"))
-        except ValueError as exc:
-            messagebox.showerror(APP_TITLE, str(exc))
-            return
         if os.path.abspath(out_path) in paths:
             messagebox.showerror(APP_TITLE, "输出文件不能和输入文件是同一个。")
             return
@@ -351,7 +327,7 @@ def build_app():
         reveal_btn.configure(state="disabled")
         set_status("统计中...")
         prog.start(12)
-        threading.Thread(target=worker, args=(paths, out_path, merges, verify_var.get()),
+        threading.Thread(target=worker, args=(paths, out_path, verify_var.get()),
                          daemon=True).start()
 
     run_btn.configure(command=start)
@@ -371,18 +347,13 @@ def selftest(argv):
     ap = argparse.ArgumentParser()
     ap.add_argument("inputs", nargs="+")
     ap.add_argument("-o", "--output", required=True)
-    ap.add_argument("--merge", action="append")
     args = ap.parse_args(argv)
-    merges = {}
-    for it in args.merge or []:
-        a, b = it.split("=", 1)
-        merges[a.strip()] = b.strip()
     def safe_log(s):
         try:
             print("  " + s)
         except Exception:   # stdout can be detached in a windowed bundle
             pass
-    run_tally(args.inputs, args.output, merges, True, safe_log)
+    run_tally(args.inputs, args.output, True, safe_log)
     return 0
 
 

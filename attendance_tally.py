@@ -13,7 +13,12 @@ Every name cell in every per-day column is counted, and all inputs are
 aggregated by (name, class) into a single output table.
 
 Example:
-    python3 tally_attendance.py -o out.xlsx week1.xlsx week2.xlsx --merge 尹湉黙=尹湉默
+    python3 tally_attendance.py -o out.xlsx week1.xlsx week2.xlsx
+
+Two names inside the same class that differ by a single character (e.g.
+尹湉默 vs 尹湉黙) are likely the same person typed two ways. They are never
+merged: each keeps its own count, the two output rows are highlighted, and a
+notice describes the pair so a human can confirm it.
 """
 
 import argparse
@@ -34,6 +39,7 @@ CLASS_HEADER = "学生所属班级"
 GRADE_HEADER = "学生所属年级"
 NAME_HINT = "学生姓名"
 OUT_HEADERS = ("学生姓名", "行政班", "需要补考勤次数")
+VARIANT_FILL = "FFF2CC"          # highlight for suspected same-person rows
 
 
 def text(v):
@@ -145,7 +151,7 @@ def detect_layout(rows):
     return None
 
 
-def tally(all_sheets, merges):
+def tally(all_sheets):
     counts = collections.Counter()
     order = collections.OrderedDict()          # class -> [name, ...] (first seen)
     grades = {}
@@ -176,7 +182,7 @@ def tally(all_sheets, merges):
             if gc is not None and gc < len(row) and text(row[gc]):
                 grades.setdefault(cls, text(row[gc]))
             for idx, j in enumerate(nc):
-                nm = merges.get(text(row[j]), text(row[j]))
+                nm = text(row[j])
                 if nm:
                     counts[(nm, cls)] += 1
                     stat["people"].add((nm, cls))
@@ -191,7 +197,7 @@ def tally(all_sheets, merges):
                 cls = parse_class(row[cc])
                 if cls is None:
                     continue
-                nm = merges.get(text(row[j]), text(row[j]))
+                nm = text(row[j])
                 if nm and nm not in order.setdefault(cls, []):
                     order[cls].append(nm)
     for src, st in per_src.items():
@@ -215,9 +221,46 @@ def build_rows(counts, order, grades):
     return out
 
 
+def _one_char_apart(a, b):
+    if len(a) != len(b):
+        return False
+    return sum(1 for x, y in zip(a, b) if x != y) == 1
+
+
+def find_variants(rows):
+    """Flag look-alike names within the same 行政班.
+
+    Two names in one class that differ by exactly one character are a likely
+    typo for the same person, but they can also be two different students.
+    We never merge them: both keep their own counts and are only highlighted
+    for a human to confirm. Names in different classes are never compared.
+    """
+    by_class = collections.OrderedDict()
+    for nm, label, _ in rows:
+        by_class.setdefault(label, []).append(nm)
+    flagged = set()
+    notices = []
+    for label, names in by_class.items():
+        pairs = [(names[i], names[j])
+                 for i in range(len(names))
+                 for j in range(i + 1, len(names))
+                 if _one_char_apart(names[i], names[j])]
+        if not pairs:
+            continue
+        for a, b in pairs:
+            flagged.add((a, label))
+            flagged.add((b, label))
+        detail = "、".join("「%s」/「%s」" % p for p in pairs)
+        notices.append(
+            "%s 里 %s 名字只差一个字，可能是同一个人在不同表里的不同写法。"
+            "这里按两个名字分别计数，这两行在结果表中已用颜色标出，请核对。" %
+            (label, detail))
+    return flagged, notices
+
+
 # ---------------------------------------------------------------- writing ----
 
-def write_book(rows, path):
+def write_book(rows, path, flagged=()):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "考勤次数统计"
@@ -231,6 +274,7 @@ def write_book(rows, path):
         cell.alignment = Alignment(horizontal="center", vertical="center")
         cell.border = border
     for i, (nm, label, cnt) in enumerate(rows, start=2):
+        fill = PatternFill("solid", fgColor=VARIANT_FILL) if (nm, label) in flagged else None
         ws.cell(row=i, column=1, value=nm)
         ws.cell(row=i, column=2, value=label)
         ws.cell(row=i, column=3, value=cnt)
@@ -238,8 +282,11 @@ def write_book(rows, path):
         ws.cell(row=i, column=2).alignment = Alignment(horizontal="left", vertical="center")
         ws.cell(row=i, column=3).alignment = Alignment(horizontal="center", vertical="center")
         for c in range(1, 4):
-            ws.cell(row=i, column=c).font = Font(name="微软雅黑", size=11)
-            ws.cell(row=i, column=c).border = border
+            cell = ws.cell(row=i, column=c)
+            cell.font = Font(name="微软雅黑", size=11)
+            cell.border = border
+            if fill is not None:
+                cell.fill = fill
     ws.column_dimensions["A"].width = 14
     ws.column_dimensions["B"].width = 12
     ws.column_dimensions["C"].width = 18
@@ -259,28 +306,15 @@ def read_back(path):
 
 # ------------------------------------------------------------------- main ----
 
-def parse_merges(items):
-    m = {}
-    for it in items or []:
-        if "=" not in it:
-            sys.exit("--merge expects FROM=TO, got %r" % it)
-        a, b = it.split("=", 1)
-        m[a.strip()] = b.strip()
-    return m
-
-
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("inputs", nargs="+", help="one or more .xlsx attendance files")
     ap.add_argument("-o", "--output", help="output .xlsx path")
-    ap.add_argument("--merge", action="append", metavar="FROM=TO",
-                    help="count name FROM as TO (typo variants); repeatable")
     ap.add_argument("--no-verify", action="store_true",
                     help="skip the independent re-count cross-check")
     args = ap.parse_args()
 
-    merges = parse_merges(args.merge)
     out = args.output or os.path.join(
         os.path.dirname(os.path.abspath(args.inputs[0])), "考勤次数统计.xlsx")
 
@@ -289,22 +323,23 @@ def main():
         for title, rows in sheets_openpyxl(p):
             all_sheets.append((os.path.basename(p), title, rows))
 
-    counts, order, grades, notes, warnings = tally(all_sheets, merges)
+    counts, order, grades, notes, warnings = tally(all_sheets)
     rows = build_rows(counts, order, grades)
+    flagged, notices = find_variants(rows)
     for n in notes:
         print("  " + n)
     if not rows:
         sys.exit("no attendance rows found - check that the sheets have a '%s' "
                  "column and '%s' name columns" % (CLASS_HEADER, NAME_HINT))
-    write_book(rows, out)
+    write_book(rows, out, flagged)
 
     total = sum(c for _, _, c in rows)
     print("people: %d   occurrences: %d" % (len(rows), total))
     for w in warnings:
         print("  WARNING: " + w)
+    for n in notices:
+        print("  提示：" + n)
     print("saved: %s" % out)
-    if merges:
-        print("merged:", ", ".join("%s->%s" % kv for kv in merges.items()))
 
     if args.no_verify:
         return
@@ -313,7 +348,7 @@ def main():
     for p in args.inputs:
         for title, rows_ in sheets_xml(p):
             xml_sheets.append((os.path.basename(p), title, rows_))
-    counts2, _, _, _, _ = tally(xml_sheets, merges)
+    counts2, _, _, _, _ = tally(xml_sheets)
     if counts2 != counts:
         diff = {k: (counts.get(k), counts2.get(k)) for k in set(counts) | set(counts2)
                 if counts.get(k) != counts2.get(k)}
